@@ -1,0 +1,135 @@
+//@version=5
+strategy("SMC Strategy | 1H FVG POI + Trend Filter [v4 Fixed]", 
+     overlay=true, 
+     initial_capital=1000, 
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=100,
+     commission_value=0.01,
+     pyramiding=0)
+
+// =================================================================================
+// INPUTS
+// =================================================================================
+htf_timeframe = input.timeframe("60", title="Higher Timeframe (POI & Trend)")
+ltf_lookback = input.int(15, title="LTF Swing Lookback Period") 
+rrRatio = input.float(2.5, title="Risk/Reward Ratio")      
+riskPercent = input.float(1.0, title="Risk per Trade (%)") / 100 
+emaLength = input.int(200, title="HTF Trend Filter EMA Length")
+
+// =================================================================================
+// FUNCTIONS & HTF DATA
+// =================================================================================
+
+// FVG ရှာဖွေရန် function
+f_getFVG(mode) =>
+    float top = na, float btm = na, bool isFVG = false
+    if mode == 1 // Bearish FVG
+        isFVG := high[2] < low[0]
+        if isFVG
+            top := high[2]
+            btm := low[0]
+    else // Bullish FVG
+        isFVG := low[2] > high[0]
+        if isFVG
+            top := high[0]
+            btm := low[2]
+    [isFVG, top, btm]
+
+// HTF Data ကို တောင်းယူခြင်း
+[isBearishFVG_htf, fvgTop_b, fvgBtm_b] = request.security(syminfo.tickerid, htf_timeframe, f_getFVG(1), lookahead=barmerge.lookahead_off)
+[isBullishFVG_htf, fvgTop_bu, fvgBtm_bu] = request.security(syminfo.tickerid, htf_timeframe, f_getFVG(-1), lookahead=barmerge.lookahead_off)
+htf_ema = request.security(syminfo.tickerid, htf_timeframe, ta.ema(close, emaLength), lookahead=barmerge.lookahead_off)
+
+// =================================================================================
+// STATE MANAGEMENT (POI & TREND)
+// =================================================================================
+
+var float bearishPOI_top = na
+var float bearishPOI_bottom = na
+var float bullishPOI_top = na
+var float bullishPOI_bottom = na
+
+// HTF Trend ကို သတ်မှတ်ခြင်း
+bool isBullishTrend = close > htf_ema
+bool isBearishTrend = close < htf_ema
+
+// POI အသစ်တွေ့တိုင်း မှတ်သားပါ (Syntax အမှားကိုပြင်ဆင်ထားသည်)
+if isBearishFVG_htf
+    bearishPOI_top := fvgTop_b
+    bearishPOI_bottom := fvgBtm_b
+if isBullishFVG_htf
+    bullishPOI_top := fvgTop_bu
+    bullishPOI_bottom := fvgBtm_bu
+
+// POI Mitigation (Syntax အမှားကိုပြင်ဆင်ထားသည်)
+if close > bearishPOI_top
+    bearishPOI_top := na
+if close < bullishPOI_bottom
+    bullishPOI_bottom := na
+
+// =================================================================================
+// ENTRY LOGIC
+// =================================================================================
+
+// ဈေးနှုန်းက POI ထဲမှာ ရှိနေသလား?
+bool inBearishPOI = not na(bearishPOI_top) and high >= bearishPOI_bottom
+bool inBullishPOI = not na(bullishPOI_top) and low <= bullishPOI_top
+
+// Bearish Entry အတွက် (Syntax အမှားကိုပြင်ဆင်ထားသည်)
+float pivotHigh = ta.pivothigh(ltf_lookback, ltf_lookback)
+var float highA = na
+var float highB = na
+if not na(pivotHigh)
+    highA := highB
+    highB := pivotHigh
+bool bearishSweep = inBearishPOI and not na(highA) and highB > highA
+bool bearishTrigger = bearishSweep and ta.crossunder(close, highA)
+
+// Bullish Entry အတွက် (Syntax အမှားကိုပြင်ဆင်ထားသည်)
+float pivotLow = ta.pivotlow(ltf_lookback, ltf_lookback)
+var float lowA = na
+var float lowB = na
+if not na(pivotLow)
+    lowA := lowB
+    lowB := pivotLow
+bool bullishSweep = inBullishPOI and not na(lowA) and lowB < lowA
+bool bullishTrigger = bullishSweep and ta.crossover(close, lowA)
+
+// အပြီးသတ် Entry Conditions (Trend Filter ထည့်သွင်းထားသည်)
+bool finalBearishEntry = isBearishTrend and bearishTrigger
+bool finalBullishEntry = isBullishTrend and bullishTrigger
+
+// =================================================================================
+// TRADE EXECUTION
+// =================================================================================
+
+// Short Entry
+if finalBearishEntry and strategy.opentrades == 0
+    sl_short = highB
+    risk_short = sl_short - close
+    if risk_short > 0
+        size_short = (strategy.equity * riskPercent) / (risk_short * syminfo.pointvalue)
+        tp_short = close - (risk_short * rrRatio)
+        strategy.entry("Short", strategy.short, qty=size_short)
+        strategy.exit("Exit Short", from_entry="Short", stop=sl_short, limit=tp_short)
+        bearishPOI_top := na
+
+// Long Entry
+if finalBullishEntry and strategy.opentrades == 0
+    sl_long = lowB
+    risk_long = close - sl_long
+    if risk_long > 0
+        size_long = (strategy.equity * riskPercent) / (risk_long * syminfo.pointvalue)
+        tp_long = close + (risk_long * rrRatio)
+        strategy.entry("Long", strategy.long, qty=size_long)
+        strategy.exit("Exit Long", from_entry="Long", stop=sl_long, limit=tp_long)
+        bullishPOI_top := na
+
+// =================================================================================
+// VISUALS
+// =================================================================================
+plot(htf_ema, "HTF EMA", color=color.new(color.blue, 0), linewidth=2)
+bgcolor(isBearishTrend and inBearishPOI ? color.new(color.red, 90) : na, title="In Bearish POI & Trend")
+bgcolor(isBullishTrend and inBullishPOI ? color.new(color.green, 90) : na, title="In Bullish POI & Trend")
+plotshape(finalBearishEntry, "Short Trigger", shape.triangledown, location.abovebar, color.red, size=size.small)
+plotshape(finalBullishEntry, "Long Trigger", shape.triangleup, location.belowbar, color.green, size=size.small)
